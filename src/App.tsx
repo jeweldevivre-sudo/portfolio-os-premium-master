@@ -8,6 +8,8 @@ import {
   ResponsiveContainer,
   BarChart,
   Bar,
+  LineChart,
+  Line,
   XAxis,
   YAxis,
   CartesianGrid,
@@ -19,7 +21,7 @@ import {
 } from "recharts";
 
 const SCRIPT_URL =
-  "https://script.google.com/macros/s/AKfycbxXqX-1iyErYaVmIFXdmdw7XJcpfKFP7nIonJbaRo06oudeaHdPahN_e9Yzg5XPW3VErg/exec";
+  "https://script.google.com/macros/s/AKfycbw-APIm2j6_ajXfoeIks4mWOfna1A0e3aef3xKb4f3nTy4FFDOpx06y1s-UHY5Gkvw/exec";
 
 const DEFAULT_TARGETS = {
   totalWealth: 5000000,
@@ -45,6 +47,14 @@ const EMPTY_HOLDING = {
 };
 
 const HOLDING_TYPES = ["Dividend", "Growth", "Other"];
+
+const DECISION_NOTE_OPTIONS = [
+  "Follow System",
+  "Add on Dip",
+  "Reduce Risk",
+  "Manual Override",
+  "Off-System",
+];
 
 const normalizeHoldingType = (...values: any[]) => {
   for (const value of values) {
@@ -244,6 +254,10 @@ function App() {
 
  const [buyOrders, setBuyOrders] = useState<any[]>([]);
 const [sellOrders, setSellOrders] = useState<any[]>([]);
+const [decisionAnalytics, setDecisionAnalytics] = useState({
+  trend: [],
+  status: [],
+});
 const [originalPortfolioSymbols, setOriginalPortfolioSymbols] = useState<string[]>([]);
 const [deletedPortfolioSymbols, setDeletedPortfolioSymbols] = useState<string[]>([]);
   const [decisionSaved, setDecisionSaved] = useState(false);
@@ -288,6 +302,7 @@ const [deletedPortfolioSymbols, setDeletedPortfolioSymbols] = useState<string[]>
       const apiPortfolio = data.portfolio || data.holdings || [];
       const apiSellOrders = data.sellAlerts || data.sellOrders || [];
       const apiBuyOrders = data.buyOrders || [];
+      const apiDecisionAnalytics = data.decisionAnalytics || { trend: [], status: [] };
       const apiPhaseControl = data.phaseControl || {};
 
       setPortfolioName(
@@ -435,8 +450,9 @@ const [deletedPortfolioSymbols, setDeletedPortfolioSymbols] = useState<string[]>
               units: o.units ?? o.buyUnits ?? 0,
               cash:
                 o.cash ?? o.cashUsed ?? o.actualBuyValue ?? o.suggestedBuy ?? 0,
-              status: o.status || o.statusNote || o.note || "BUY",
+              status: o.status || o.statusNote || "BUY",
               note: o.note || "",
+              execute: String(o.execute || o.note || "EXECUTE").trim().toUpperCase(),
             }))
         );
       } else {
@@ -462,6 +478,22 @@ const [deletedPortfolioSymbols, setDeletedPortfolioSymbols] = useState<string[]>
       } else {
         setSellOrders([]);
       }
+
+      setDecisionAnalytics({
+        trend: Array.isArray(apiDecisionAnalytics.trend)
+          ? apiDecisionAnalytics.trend.map((d) => ({
+              ...d,
+              score: num(d.score),
+              outcomePercent: num(d.outcomePercent),
+            }))
+          : [],
+        status: Array.isArray(apiDecisionAnalytics.status)
+          ? apiDecisionAnalytics.status.map((d) => ({
+              status: d.status,
+              count: num(d.count),
+            }))
+          : [],
+      });
     } catch (err: any) {
       console.error("Load error:", err);
       setLoadError(err.message || "Load error");
@@ -601,7 +633,7 @@ const [deletedPortfolioSymbols, setDeletedPortfolioSymbols] = useState<string[]>
       actualPrice:
         current.actualPrice ??
         (order.price === "" || order.price === undefined ? "" : order.price),
-      note: current.note ?? "",
+      note: current.note ?? "Follow System",
     };
   };
 
@@ -657,7 +689,7 @@ const [deletedPortfolioSymbols, setDeletedPortfolioSymbols] = useState<string[]>
           suggestedPrice,
           actualPrice,
           buySellPrice: actualPrice,
-          note: edit.note || order.note || "",
+          note: edit.note || "Follow System",
         }),
       });
 
@@ -669,6 +701,7 @@ const [deletedPortfolioSymbols, setDeletedPortfolioSymbols] = useState<string[]>
       setLoggedOrderIds((prev) => [...prev, orderId]);
       setDecisionSaved(true);
       setTimeout(() => setDecisionSaved(false), 2000);
+      await loadPortfolioFromSheet();
     } catch (err: any) {
       console.error("Order decision save error:", err);
       setLoadError(err.message || "Order decision save error");
@@ -1023,6 +1056,72 @@ const [deletedPortfolioSymbols, setDeletedPortfolioSymbols] = useState<string[]>
     actual: m.target > 0 ? Math.min((m.current / m.target) * 100, 100) : 0,
     target: 100,
   }));
+
+  const decisionTrendData = (decisionAnalytics.trend || []).map((d, i) => ({
+    name: `D${i + 1}`,
+    note: d.note || "",
+    score: num(d.score),
+    outcomePercent: num(d.outcomePercent),
+  }));
+
+  const decisionStatusData = (decisionAnalytics.status || []).map((d) => ({
+    name: String(d.status || "").replace(/[🟢🟡🔴]/g, "").trim() || String(d.status || "Status"),
+    value: num(d.count),
+    rawStatus: d.status,
+  }));
+
+  const averageDecisionScore =
+    decisionTrendData.length > 0
+      ? decisionTrendData.reduce((s, d) => s + num(d.score), 0) /
+        decisionTrendData.length
+      : 0;
+
+  const averageOutcomePercent =
+    decisionTrendData.length > 0
+      ? decisionTrendData.reduce((s, d) => s + num(d.outcomePercent), 0) /
+        decisionTrendData.length
+      : 0;
+
+  const decisionCount = decisionTrendData.length;
+
+  const followSystemCount = decisionTrendData.filter(
+    (d) => String(d.note || "").trim() === "Follow System"
+  ).length;
+
+  const followSystemRate =
+    decisionCount > 0 ? (followSystemCount / decisionCount) * 100 : 0;
+
+  const decisionAverageByNote = Object.values(
+    decisionTrendData.reduce((acc, d) => {
+      const key = String(d.note || "Unknown").trim() || "Unknown";
+      if (!acc[key]) {
+        acc[key] = {
+          note: key,
+          count: 0,
+          totalScore: 0,
+          totalOutcome: 0,
+        };
+      }
+      acc[key].count += 1;
+      acc[key].totalScore += num(d.score);
+      acc[key].totalOutcome += num(d.outcomePercent);
+      return acc;
+    }, {})
+  ).map((d: any) => ({
+    name: d.note,
+    count: d.count,
+    avgScore: d.count > 0 ? d.totalScore / d.count : 0,
+    avgOutcomePercent: d.count > 0 ? d.totalOutcome / d.count : 0,
+  }));
+
+  const decisionRadarData = DECISION_NOTE_OPTIONS.map((note) => {
+    const found = decisionAverageByNote.find((d: any) => d.name === note);
+    return {
+      reason: note,
+      avgScore: found ? num((found as any).avgScore) : 0,
+      fullScore: 3,
+    };
+  });
 
   return (
     <div
@@ -1954,7 +2053,7 @@ const [deletedPortfolioSymbols, setDeletedPortfolioSymbols] = useState<string[]>
                 </button>
               </div>
 
-              {buyOrders.length === 0 && (
+              {buyOrders.filter((o, i) => String(o.execute || o.note || "EXECUTE").trim().toUpperCase() !== "SKIP" && !loggedOrderIds.includes(`BUY-${o.id || o.symbol || i}`)).length === 0 && (
                 <div
                   style={{
                     background: "#080e1c",
@@ -1970,7 +2069,7 @@ const [deletedPortfolioSymbols, setDeletedPortfolioSymbols] = useState<string[]>
                 </div>
               )}
 
-              {buyOrders.map((o, i) => {
+              {buyOrders.filter((o, i) => String(o.execute || o.note || "EXECUTE").trim().toUpperCase() !== "SKIP" && !loggedOrderIds.includes(`BUY-${o.id || o.symbol || i}`)).map((o, i) => {
                 const orderId = `BUY-${o.id || o.symbol || i}`;
                 const edit = getOrderEdit(o, "BUY");
                 const isLogged = loggedOrderIds.includes(orderId);
@@ -2181,13 +2280,12 @@ const [deletedPortfolioSymbols, setDeletedPortfolioSymbols] = useState<string[]>
                       </div>
                     </div>
 
-                    <input
-                      value={edit.note}
+                    <select
+                      value={edit.note || "Follow System"}
                       onChange={(e) =>
                         updateOrderEdit(orderId, "note", e.target.value)
                       }
                       disabled={isLogged || !isActionableBuy}
-                      placeholder="Optional note / override reason"
                       style={{
                         width: "100%",
                         marginTop: 8,
@@ -2200,7 +2298,13 @@ const [deletedPortfolioSymbols, setDeletedPortfolioSymbols] = useState<string[]>
                         padding: "8px 10px",
                         outline: "none",
                       }}
-                    />
+                    >
+                      {DECISION_NOTE_OPTIONS.map((noteOption) => (
+                        <option key={noteOption} value={noteOption}>
+                          {noteOption}
+                        </option>
+                      ))}
+                    </select>
 
                     <label
                       style={{
@@ -2585,13 +2689,12 @@ const [deletedPortfolioSymbols, setDeletedPortfolioSymbols] = useState<string[]>
                           </div>
                         </div>
 
-                        <input
-                          value={edit.note}
+                        <select
+                          value={edit.note || "Follow System"}
                           onChange={(e) =>
                             updateOrderEdit(orderId, "note", e.target.value)
                           }
                           disabled={isLogged}
-                          placeholder="Optional note / override reason"
                           style={{
                             width: "100%",
                             marginTop: 8,
@@ -2604,7 +2707,13 @@ const [deletedPortfolioSymbols, setDeletedPortfolioSymbols] = useState<string[]>
                             padding: "8px 10px",
                             outline: "none",
                           }}
-                        />
+                        >
+                          {DECISION_NOTE_OPTIONS.map((noteOption) => (
+                            <option key={noteOption} value={noteOption}>
+                              {noteOption}
+                            </option>
+                          ))}
+                        </select>
 
                         <label
                           style={{
@@ -3766,6 +3875,255 @@ const [deletedPortfolioSymbols, setDeletedPortfolioSymbols] = useState<string[]>
                   );
                 })}
               </div>
+            </div>
+
+            <div className={card} style={{ padding: isMobile ? 16 : 22 }}>
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: isMobile ? "flex-start" : "center",
+                  gap: 12,
+                  flexDirection: isMobile ? "column" : "row",
+                  marginBottom: 14,
+                }}
+              >
+                <div>
+                  <div style={{ ...ST, marginBottom: 4 }}>
+                    Decision Quality
+                  </div>
+                  <div
+                    style={{ fontSize: 11, color: "#64748b", lineHeight: 1.45 }}
+                  >
+                    Average decision quality from Decision Log. This stays
+                    readable even when you have hundreds of records.
+                  </div>
+                </div>
+              </div>
+
+              {decisionTrendData.length === 0 ? (
+                <div
+                  style={{
+                    background: "#080e1c",
+                    borderRadius: 12,
+                    padding: "26px 20px",
+                    textAlign: "center",
+                    border: "1px dashed #1a2540",
+                    color: "#5f728a",
+                    fontSize: 13,
+                  }}
+                >
+                  No decision log data yet
+                </div>
+              ) : (
+                <>
+                  <div
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: isMobile
+                        ? "1fr"
+                        : "repeat(4,1fr)",
+                      gap: 12,
+                      marginBottom: 14,
+                    }}
+                  >
+                    {[
+                      {
+                        label: "Avg Score",
+                        value: fmt(averageDecisionScore, 2),
+                        color: "#a78bfa",
+                        sub: "Good = 3 / Neutral = 1 / Bad = 0",
+                      },
+                      {
+                        label: "Avg Outcome",
+                        value: `${averageOutcomePercent > 0 ? "+" : ""}${fmt(
+                          averageOutcomePercent,
+                          2
+                        )}%`,
+                        color:
+                          averageOutcomePercent > 0
+                            ? "#34d399"
+                            : averageOutcomePercent < 0
+                            ? "#f87171"
+                            : "#f59e0b",
+                        sub: "Average outcome after decision",
+                      },
+                      {
+                        label: "Follow System Rate",
+                        value: `${fmt(followSystemRate, 2)}%`,
+                        color: "#60a5fa",
+                        sub: `${followSystemCount} of ${decisionCount} decisions`,
+                      },
+                      {
+                        label: "Decision Count",
+                        value: decisionCount.toLocaleString(),
+                        color: "#f59e0b",
+                        sub: "Total logged decisions",
+                      },
+                    ].map((m) => (
+                      <div
+                        key={m.label}
+                        style={{
+                          background: "#080e1c",
+                          border: "1px solid #1a2540",
+                          borderRadius: 12,
+                          padding: "12px 14px",
+                        }}
+                      >
+                        <div
+                          style={{
+                            fontSize: 10,
+                            color: "#64748b",
+                            marginBottom: 5,
+                            fontWeight: 800,
+                            letterSpacing: "0.08em",
+                            textTransform: "uppercase",
+                          }}
+                        >
+                          {m.label}
+                        </div>
+                        <div
+                          style={{
+                            color: m.color,
+                            fontFamily: "'DM Mono', monospace",
+                            fontWeight: 800,
+                            fontSize: 20,
+                            marginBottom: 5,
+                          }}
+                        >
+                          {m.value}
+                        </div>
+                        <div
+                          style={{
+                            color: "#4b607b",
+                            fontSize: 10,
+                            lineHeight: 1.45,
+                          }}
+                        >
+                          {m.sub}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: isMobile ? "1fr" : "1.4fr 1fr",
+                      gap: 14,
+                    }}
+                  >
+                    <div
+                      style={{
+                        background: "#080e1c",
+                        border: "1px solid #1a2540",
+                        borderRadius: 12,
+                        padding: "16px 14px",
+                      }}
+                    >
+                      <div style={ST}>Behavior Radar — Avg Score</div>
+                      <ResponsiveContainer
+                        width="100%"
+                        height={isMobile ? 240 : 270}
+                      >
+                        <RadarChart data={decisionRadarData}>
+                          <PolarGrid stroke="#1a2540" />
+                          <PolarAngleAxis
+                            dataKey="reason"
+                            tick={{ fill: "#7d8ea5", fontSize: 10 }}
+                          />
+                          <YAxis domain={[0, 3]} hide />
+                          <Radar
+                            name="Full Score"
+                            dataKey="fullScore"
+                            stroke="#334155"
+                            fill="#334155"
+                            fillOpacity={0.08}
+                            strokeOpacity={0.35}
+                            strokeWidth={1}
+                          />
+                          <Radar
+                            name="Avg Score"
+                            dataKey="avgScore"
+                            stroke="#a78bfa"
+                            fill="#a78bfa"
+                            fillOpacity={0.28}
+                            strokeWidth={2}
+                          />
+                          <RechartsTooltip
+                            contentStyle={{
+                              background: "#0d1526",
+                              border: "1px solid #1a2540",
+                              borderRadius: 8,
+                            }}
+                          />
+                          <Legend
+                            wrapperStyle={{
+                              fontSize: 11,
+                              color: "#7d8ea5",
+                            }}
+                          />
+                        </RadarChart>
+                      </ResponsiveContainer>
+                    </div>
+
+                    <div
+                      style={{
+                        background: "#080e1c",
+                        border: "1px solid #1a2540",
+                        borderRadius: 12,
+                        padding: "16px 14px",
+                      }}
+                    >
+                      <div style={ST}>Decision Status</div>
+                      <ResponsiveContainer
+                        width="100%"
+                        height={isMobile ? 220 : 250}
+                      >
+                        <PieChart>
+                          <Pie
+                            data={decisionStatusData}
+                            dataKey="value"
+                            nameKey="name"
+                            cx="50%"
+                            cy="50%"
+                            innerRadius={isMobile ? 34 : 46}
+                            outerRadius={isMobile ? 68 : 82}
+                            paddingAngle={4}
+                          >
+                            {decisionStatusData.map((d, i) => (
+                              <Cell
+                                key={i}
+                                fill={
+                                  String(d.rawStatus || "").includes("Good")
+                                    ? "#34d399"
+                                    : String(d.rawStatus || "").includes("Bad")
+                                    ? "#f87171"
+                                    : "#f59e0b"
+                                }
+                              />
+                            ))}
+                          </Pie>
+                          <RechartsTooltip
+                            contentStyle={{
+                              background: "#0d1526",
+                              border: "1px solid #1a2540",
+                              borderRadius: 8,
+                            }}
+                          />
+                          <Legend
+                            wrapperStyle={{
+                              fontSize: 11,
+                              color: "#7d8ea5",
+                            }}
+                          />
+                        </PieChart>
+                      </ResponsiveContainer>
+                    </div>
+
+                  </div>
+                </>
+              )}
             </div>
 
             <div
